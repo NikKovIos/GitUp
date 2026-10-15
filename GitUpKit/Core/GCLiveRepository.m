@@ -64,6 +64,7 @@ static _Atomic int32_t _allocatedCount = ATOMIC_VAR_INIT(0);
   int _gitDirectory;
   FSEventStreamRef _gitDirectoryStream;
   BOOL _gitDirectoryChanged;
+  BOOL _worktreesChanged;
   FSEventStreamRef _workingDirectoryStream;
   BOOL _workingDirectoryChanged;
   CFRunLoopTimerRef _updateTimer;  // Can't use a NSTimer because of retain-cycle
@@ -109,8 +110,12 @@ static _Atomic int32_t _allocatedCount = ATOMIC_VAR_INIT(0);
 - (void)_timer:(CFRunLoopTimerRef)timer {
   if (timer == _updateTimer) {
     [self _notifyWorkingDirectoryChanged:_workingDirectoryChanged gitDirectoryChanged:_gitDirectoryChanged];
+    if (_worktreesChanged && !_gitDirectoryChanged) {  // A git directory change already reloads the history
+      [self _notifyWorktreesChanged];
+    }
     _workingDirectoryChanged = NO;
     _gitDirectoryChanged = NO;
+    _worktreesChanged = NO;
   } else if (timer == _snapshotsTimer) {
     [self _saveAutomaticSnapshotIfPending];
   } else {
@@ -141,6 +146,10 @@ static void _TimerCallBack(CFRunLoopTimerRef timer, void* info) {
           if (!subPath[0] || !strncmp(subPath, "refs/", 5) || !strncmp(subPath, "logs/", 5)) {  // We only care about ".git/", ".git/refs/*" and ".git/logs/*"
             XLOG_DEBUG(@"Processed file system event for '%s'", path);
             _gitDirectoryChanged = YES;
+            CFRunLoopTimerSetNextFireDate(_updateTimer, CFAbsoluteTimeGetCurrent() + kUpdateLatency);
+          } else if (!strncmp(subPath, "worktrees/", 10)) {  // We also care about ".git/worktrees/*" to know which branches are checked out in linked worktrees
+            XLOG_DEBUG(@"Processed file system event for '%s'", path);
+            _worktreesChanged = YES;
             CFRunLoopTimerSetNextFireDate(_updateTimer, CFAbsoluteTimeGetCurrent() + kUpdateLatency);
           } else {
             XLOG_DEBUG(@"Dropped file system event for '%s'", path);
@@ -298,6 +307,15 @@ static void _StreamCallback(ConstFSEventStreamRef streamRef, void* clientCallBac
       [self.delegate repositoryDidChange:self];
     }
     [[NSNotificationCenter defaultCenter] postNotificationName:GCLiveRepositoryDidChangeNotification object:self];
+  }
+}
+
+// Linked worktrees only affect which branches are checked out in them so there's no need for a full update
+- (void)_notifyWorktreesChanged {
+  if (_historyUpdatesSuspended > 0) {
+    _historyUpdatePending = YES;
+  } else {
+    [self _updateHistory];
   }
 }
 
